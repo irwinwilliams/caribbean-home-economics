@@ -1,4 +1,5 @@
-#Mopping
+# Mopping
+
 Mopping is a thing you do in degrees. Generally, do as little as you can. 
 If you have to do more, it's a staged thing.
 1. Sweep the area to be mopped. (You may be tempted to skip this if the level of dust is "light", don't, you'll just end up with a dirty mop and you'll take longer anyway).
