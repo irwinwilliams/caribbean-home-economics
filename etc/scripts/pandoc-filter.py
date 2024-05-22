@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 # ---------------------------------------------------------------------------
-# Copyright © 2017-2019 Brian M. Clapper
+# Copyright © 2017-2023 Brian M. Clapper
 #
 # This program is free software: you can redistribute it and/or modify it under
 # the terms of the GNU General Public License as published by the Free Software
@@ -25,65 +25,90 @@ See http://scorreia.com/software/panflute/ and
 https://github.com/jgm/pandoc/wiki/Pandoc-Filters
 """
 
+import re
 import sys
-from panflute import *
-import os
 from itertools import dropwhile, takewhile
-from typing import Pattern, Match, Any, List, Generic, TypeVar, Optional
+from typing import (
+    Any,
+    Generic,
+    List,
+    Mapping,
+    Match,
+    NoReturn,
+    Optional,
+    Pattern,
+    TypeVar,
+)
+
+# Note: panflute is oddly typed, in a way that can confuse pyright (and,
+# presumably, other type checkers), even though the code runs fine. There are
+# occasional "type: ignore" annotations in this code to keep pyright happy.
+from panflute import (
+    Div,
+    Doc,
+    Element,
+    Header,
+    LineBreak,
+    Para,
+    RawBlock,
+    RawInline,
+    run_filter,
+    Str,
+)
 
 # Need the lib module. Make sure it can be found.
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from lib import *
+# sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+# from lib import *
 
-if sys.version_info < (3,6):
-    print("Must use Python 3.6 or better.")
+if sys.version_info < (3, 10):
+    print("Must use Python 3.10 or better.")
     sys.exit(1)
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-LEFT_JUSTIFY = '{<}'
-CENTER_JUSTIFY = '{-}'
-RIGHT_JUSTIFY = '{>}'
+LEFT_JUSTIFY = "{<}"
+CENTER_JUSTIFY = "{-}"
+RIGHT_JUSTIFY = "{>}"
 
-AUTHOR_PAT = re.compile(r'^(.*)%author%(.*)$')
-TITLE_PAT = re.compile(r'^(.*)%title%(.*)$')
-SUBTITLE_PAT = re.compile(r'^(.*)%subtitle%(.*)$')
-COPYRIGHT_OWNER_PAT = re.compile(r'^(.*)%copyright-owner%(.*)$')
-COPYRIGHT_YEAR_PAT = re.compile(r'^(.*)%copyright-year%(.*)$')
-PUBLISHER_PAT = re.compile(r'^(.*)%publisher%(.*)$')
-LANGUAGE_PAT = re.compile(r'^(.*)%language%(.*)$')
+AUTHOR_PAT = re.compile(r"^(.*)%author%(.*)$")
+TITLE_PAT = re.compile(r"^(.*)%title%(.*)$")
+SUBTITLE_PAT = re.compile(r"^(.*)%subtitle%(.*)$")
+COPYRIGHT_OWNER_PAT = re.compile(r"^(.*)%copyright-owner%(.*)$")
+COPYRIGHT_YEAR_PAT = re.compile(r"^(.*)%copyright-year%(.*)$")
+PUBLISHER_PAT = re.compile(r"^(.*)%publisher%(.*)$")
+LANGUAGE_PAT = re.compile(r"^(.*)%language%(.*)$")
 
 # Patterns that are simple strings in the metadata.
 SIMPLE_PATTERNS = (
-    (TITLE_PAT,           'title'),
-    (SUBTITLE_PAT,        'subtitle'),
-    (COPYRIGHT_OWNER_PAT, 'copyright.owner'),
-    (COPYRIGHT_YEAR_PAT,  'copyright.year'),
-    (PUBLISHER_PAT,       'publisher'),
-    (LANGUAGE_PAT,        'language')
+    (TITLE_PAT, "title"),
+    (SUBTITLE_PAT, "subtitle"),
+    (COPYRIGHT_OWNER_PAT, "copyright.owner"),
+    (COPYRIGHT_YEAR_PAT, "copyright.year"),
+    (PUBLISHER_PAT, "publisher"),
+    (LANGUAGE_PAT, "language"),
 )
 
 XHTML_JUSTIFICATION_CLASSES = {
     # token           class
-    LEFT_JUSTIFY:     'left',
-    CENTER_JUSTIFY:   'center',
-    RIGHT_JUSTIFY:    'right'
+    LEFT_JUSTIFY: "left",
+    CENTER_JUSTIFY: "center",
+    RIGHT_JUSTIFY: "right",
 }
 
 LATEX_JUSTIFICATION_ENVIRONMENTS = {
     # token           env
-    LEFT_JUSTIFY:     'flushleft',
-    CENTER_JUSTIFY:   'center',
-    RIGHT_JUSTIFY:    'flushright'
+    LEFT_JUSTIFY: "flushleft",
+    CENTER_JUSTIFY: "center",
+    RIGHT_JUSTIFY: "flushright",
 }
 
 DOCX_JUSTIFICATION_STYLES = {
     # token           env
-    LEFT_JUSTIFY:     'JustifyLeft',
-    CENTER_JUSTIFY:   'Centered',
-    RIGHT_JUSTIFY:    'JustifyRight'
+    LEFT_JUSTIFY: "JustifyLeft",
+    CENTER_JUSTIFY: "Centered",
+    RIGHT_JUSTIFY: "JustifyRight",
 }
 
 
@@ -91,7 +116,7 @@ DOCX_JUSTIFICATION_STYLES = {
 # Helper classes
 # ---------------------------------------------------------------------------
 
-T = TypeVar('T')
+T = TypeVar("T")
 
 
 class DataHolder(Generic[T]):
@@ -99,6 +124,7 @@ class DataHolder(Generic[T]):
     Allows for assign-and-test. See
     http://code.activestate.com/recipes/66061-assign-and-test/
     """
+
     def __init__(self, value: Optional[T] = None):
         self.value = value
 
@@ -114,6 +140,7 @@ class DataHolder(Generic[T]):
 # Helper Functions
 # ---------------------------------------------------------------------------
 
+
 def debug(message: str) -> None:
     """
     Dump a debug message to stderr.
@@ -125,7 +152,41 @@ def debug(message: str) -> None:
     print(message, file=sys.stderr)
 
 
-def matches_text(elem: Element,  text: str) -> bool:
+def abort(message: str) -> NoReturn:
+    """
+    Print a message and exit.
+    """
+    print(message, file=sys.stderr)
+    sys.exit(1)
+
+
+def validate_metadata(dict_like: Mapping[str, Any]) -> None:
+    """
+    Validates metadata that's been loaded into a dictionary-like object.
+    Throws an exception if a required key is missing.
+    """
+    for key in (
+        "title",
+        "author",
+        "copyright.owner",
+        "copyright.year",
+        "publisher",
+        "language",
+        "genre",
+    ):
+        # Drill through composite keys.
+        keys = key.split(".") if "." in key else [key]
+        d = dict_like
+        v = None
+        for k in keys:
+            v = d.get(k)
+            d = v if v else {}
+
+        if not v:
+            abort(f'Missing required "{key}" in metadata.')
+
+
+def matches_text(elem: Element, text: str) -> bool:
     """
     Convenience function to see if an element is a Str element and matches
     the specified text.
@@ -140,7 +201,7 @@ def matches_text(elem: Element,  text: str) -> bool:
     return isinstance(elem, Str) and elem.text == text
 
 
-def matches_pattern(elem: Element, regex: Pattern) -> Match:
+def matches_pattern(elem: Element, regex: Pattern) -> Match | None:
     """
     Convenience function to see if an element is a Str element and matches
     the specified regular expression.
@@ -173,7 +234,9 @@ def paragraph_starts_with_child(elem: Element, string: str) -> bool:
         return False
 
     # Skip any LineBreak elements at the beginning.
-    stripped = list(dropwhile(lambda e: isinstance(e, LineBreak), elem.content))
+    stripped = list(
+        dropwhile(lambda e: isinstance(e, LineBreak), elem.content)
+    )
 
     if len(stripped) == 0:
         return False
@@ -197,8 +260,9 @@ def paragraph_contains_child(elem: Element, string: str) -> bool:
     Returns: True on match, False otherwise. Also returns false if the
     passed AST element is not a Para object.
     """
-    return (isinstance(elem, Para) and
-            any(matches_text(x, string) for x in elem.content))
+    return isinstance(elem, Para) and any(
+        matches_text(x, string) for x in elem.content
+    )
 
 
 def is_epub(format: str) -> bool:
@@ -212,7 +276,7 @@ def is_epub(format: str) -> bool:
 
     Returns: True if the output format is an ePub format, False otherwise.
     """
-    return format.startswith('epub')
+    return format.startswith("epub")
 
 
 def justify(elem: Element, format: str, token: str) -> Element:
@@ -230,34 +294,44 @@ def justify(elem: Element, format: str, token: str) -> Element:
 
     Returns: the adjusted element
     """
+
     def drop(child):
         return isinstance(child, LineBreak) or matches_text(child, token)
 
-    leading_line_skips = list(takewhile(lambda e: isinstance(e, LineBreak),
-                                        elem.content))
+    leading_line_skips = list(
+        takewhile(lambda e: isinstance(e, LineBreak), elem.content)
+    )
     children = list(dropwhile(drop, elem.content))
 
-    if (format == 'html') or is_epub(format):
+    if (format == "html") or is_epub(format):
         xhtml_class = XHTML_JUSTIFICATION_CLASSES[token]
-        return Div(Para(*leading_line_skips), Para(*children),
-                   attributes={'class': xhtml_class})
-    elif format == 'latex':
+        return Div(
+            Para(*leading_line_skips),
+            Para(*children),
+            attributes={"class": xhtml_class},
+        )
+    elif format == "latex":
         # Leading line skips cause a problem in LaTeX, when combined with
         # these environments (at least, the way Pandoc generates the LaTeX).
         # Don't include them.
         latex_env = LATEX_JUSTIFICATION_ENVIRONMENTS[token]
         new_children = (
-            [RawInline(r'\begin{' + latex_env + '}', 'latex')] +
-            children +
-            [RawInline(r'\end{' + latex_env + '}', 'latex'),
-             RawInline(r'\bigskip', 'latex')]
+            [RawInline(r"\begin{" + latex_env + "}", "latex")]
+            + children
+            + [
+                RawInline(r"\end{" + latex_env + "}", "latex"),
+                RawInline(r"\bigskip", "latex"),
+            ]
         )
         return Para(*new_children)
 
-    elif format == 'docx':
+    elif format == "docx":
         docx_style = DOCX_JUSTIFICATION_STYLES[token]
-        return Div(Para(*leading_line_skips), Para(*children),
-                   attributes={'custom-style': docx_style})
+        return Div(
+            Para(*leading_line_skips),
+            Para(*children),
+            attributes={"custom-style": docx_style},
+        )
 
     else:
         return Div(Para(*leading_line_skips), Para(*children))
@@ -317,15 +391,22 @@ def section_sep(elem: Element, format: str) -> Element:
     Returns: the possibly updated element
     """
     sep = "• • •"
-    if (format == 'html') or is_epub(format):
+    if (format == "html") or is_epub(format):
         return RawBlock(f'<div class="sep">{sep}</div>')
-    elif format == 'latex':
-        return Para(*[RawInline(r'\bigskip', format),
-                      RawInline(r'\begin{center}', format)] +
-                     [Str(sep)] +
-                     [RawInline(r'\end{center}', format),
-                      RawInline(r'\bigskip', format)])
-    elif format == 'docx':
+    elif format == "latex":
+        tokens = (
+            [
+                RawInline(r"\bigskip", format),
+                RawInline(r"\begin{center}", format),
+            ]
+            + [Str(sep)]
+            + [
+                RawInline(r"\end{center}", format),
+                RawInline(r"\bigskip", format),
+            ]
+        )
+        return Para(*tokens)
+    elif format == "docx":
         return center_paragraph(Para(Str(sep)), format)
     else:
         return elem
@@ -349,7 +430,11 @@ def substitute_any_metadata(elem: Element, doc: Any) -> Element:
     for pat, meta_key in SIMPLE_PATTERNS:
         m = matches_pattern(elem, pat)
         if m:
-            s = doc.get_metadata(meta_key, '')
+            s = doc.get_metadata(meta_key, "")
+            # Note: For things with multiple possible values, like "author",
+            # Pandoc handles converting the list of elements into something
+            # useful (e.g., Author1, Author2 and Author3). So we don't have
+            # to do anything special.
             return Str(f"{m.group(1)}{s}{m.group(2)}")
 
     return elem
@@ -366,17 +451,17 @@ def newpage(format: str) -> List[Element]:
 
     Returns: the sequence of elements to force a new page, or []
     """
-    if format == 'latex':
-        return [RawBlock(r'\newpage', format)]
+    if format == "latex":
+        return [RawBlock(r"\newpage", format)]
     elif is_epub(format):
         return [RawBlock(r'<p class="pagebreak"></p>')]
-    elif format == 'docx':
-        return [Div(Para(Str('')), attributes={'custom-style': 'NewPage'})]
+    elif format == "docx":
+        return [Div(Para(Str("")), attributes={"custom-style": "NewPage"})]
     else:
         return []
 
 
-def prepare(doc: Doc):
+def prepare(doc: Doc) -> None:
     """
     Filter initialization.
 
@@ -385,7 +470,7 @@ def prepare(doc: Doc):
     doc: the Document object
     """
     # Validate the metadata
-    validate_metadata(doc.get_metadata())
+    validate_metadata(doc.get_metadata())  # type: ignore
 
 
 def transform(elem: Element, doc: Doc) -> Element:
@@ -404,7 +489,7 @@ def transform(elem: Element, doc: Doc) -> Element:
         new_elem = elem
         if len(elem.content) == 0:
             # Special case LaTeX and Word: Replace with new page.
-            if doc.format in ['latex', 'docx']:
+            if doc.format in ["latex", "docx"]:
                 new_elem = Div(*newpage(doc.format))
         else:
             # Force page break, if not ePub.
@@ -413,8 +498,8 @@ def transform(elem: Element, doc: Doc) -> Element:
                 new_elem = Div(*new_elements)
         return new_elem
 
-    elif paragraph_contains_child(elem, '%newpage%'):
-        abort('%newpage% is no longer supported.')
+    elif paragraph_contains_child(elem, "%newpage%"):
+        abort("%newpage% is no longer supported.")
 
     elif paragraph_starts_with_child(elem, LEFT_JUSTIFY):
         return left_justify_paragraph(elem, doc.format)
@@ -425,21 +510,23 @@ def transform(elem: Element, doc: Doc) -> Element:
     elif paragraph_starts_with_child(elem, RIGHT_JUSTIFY):
         return right_justify_paragraph(elem, doc.format)
 
-    elif paragraph_contains_child(elem, '+++'):
+    elif paragraph_contains_child(elem, "+++"):
         return section_sep(elem, doc.format)
 
     elif data.set(matches_pattern(elem, AUTHOR_PAT)):
-        authors = doc.get_metadata('author', [])
-        m = data.get()
-        author_str = ""
-        for i, a in enumerate(authors):
-            sep = ", " if i < (len(authors) - 1) else " and "
-            if i > 0:
-                author_str = f"{author_str}{sep}{a}"
-            else:
-                author_str = a
+        authors = doc.get_metadata("author", [])  # type: ignore
+        if (m := data.get()) is None:
+            return elem
+        else:
+            author_str = ""
+            for i, a in enumerate(authors):
+                sep = ", " if i < (len(authors) - 1) else " and "
+                if i > 0:
+                    author_str = f"{author_str}{sep}{a}"
+                else:
+                    author_str = a
 
-        return Str(f"{m.group(1)}{author_str}{m.group(2)}")
+            return Str(f"{m.group(1)}{author_str}{m.group(2)}")
 
     elif isinstance(elem, Str):
         return substitute_any_metadata(elem, doc)
@@ -448,8 +535,8 @@ def transform(elem: Element, doc: Doc) -> Element:
         return elem
 
 
-def main(doc: Optional[Doc] = None):
-    return run_filter(transform, prepare=prepare, doc=doc)
+def main(doc: Optional[Doc] = None) -> None:
+    run_filter(transform, prepare=prepare, doc=doc)
 
 
 if __name__ == "__main__":
